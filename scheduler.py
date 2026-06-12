@@ -16,9 +16,12 @@ def run_reminder_scan() -> dict:
     logger.info("开始执行每日到期提醒扫描...")
     db = SessionLocal()
     try:
+        cleanup_count = notifier.cleanup_expired_sent_records(db)
+        logger.info("过期幂等记录已清理 %d 条", cleanup_count)
+
         items = notifier.fetch_upcoming_items(db, within_days=7)
         logger.info("扫描到 %d 条即将到期的行动项", len(items))
-        result = notifier.send_reminders(items)
+        result = notifier.send_reminders(items, db_session=db)
         logger.info("提醒执行结果: %s", result)
         return result
     except Exception as exc:

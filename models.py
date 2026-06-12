@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Enum, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -64,3 +64,17 @@ class ActionItem(Base):
 
     meeting = relationship("Meeting", back_populates="actions")
     assignee = relationship("Assignee", back_populates="actions")
+
+
+class ReminderSent(Base):
+    __tablename__ = "reminder_sent"
+
+    id = Column(Integer, primary_key=True, index=True)
+    action_id = Column(Integer, ForeignKey("action_items.id", ondelete="CASCADE"), nullable=False)
+    sent_date = Column(String(10), nullable=False)
+    sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    channel = Column(String(20), nullable=False, default="feishu")
+
+    __table_args__ = (
+        UniqueConstraint("action_id", "sent_date", name="uq_action_sent_date"),
+    )

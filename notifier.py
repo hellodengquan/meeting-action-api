@@ -1,16 +1,18 @@
 import logging
 import json
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 import requests
 
 from config import NotificationConfig, notification_config
-from models import ActionItem, ActionStatus
+from models import ActionItem, ActionStatus, ReminderSent
 
 
 logger = logging.getLogger("reminder")
 logger.setLevel(logging.INFO)
+
+REMINDER_RETENTION_DAYS = 7
 
 
 def _setup_file_logger(log_path: str) -> logging.Logger:
@@ -84,26 +86,112 @@ def log_reminder_fallback(structured: List[dict], log_path: str, reason: str) ->
         file_logger.info(json.dumps(entry, ensure_ascii=False))
 
 
+# ============================================================
+# 幂等控制
+# ============================================================
+
+def _sent_date(now: Optional[datetime] = None) -> str:
+    if now is None:
+        now = datetime.utcnow()
+    return now.strftime("%Y-%m-%d")
+
+
+def fetch_already_sent_action_ids(db_session, now: Optional[datetime] = None) -> Set[int]:
+    sent_date_str = _sent_date(now)
+    rows = (
+        db_session.query(ReminderSent.action_id)
+        .filter(ReminderSent.sent_date == sent_date_str)
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def filter_pending_items(db_session, items: List[ActionItem], now: Optional[datetime] = None) -> List[ActionItem]:
+    sent_ids = fetch_already_sent_action_ids(db_session, now=now)
+    return [item for item in items if item.id not in sent_ids]
+
+
+def mark_items_as_sent(db_session, items: List[ActionItem], channel: str = "feishu", now: Optional[datetime] = None) -> None:
+    sent_date_str = _sent_date(now)
+    sent_at = now or datetime.utcnow()
+    existing_ids = fetch_already_sent_action_ids(db_session, now=now)
+    new_records = [
+        ReminderSent(action_id=item.id, sent_date=sent_date_str, sent_at=sent_at, channel=channel)
+        for item in items
+        if item.id not in existing_ids
+    ]
+    if new_records:
+        db_session.bulk_save_objects(new_records)
+        db_session.commit()
+
+
+def cleanup_expired_sent_records(db_session, now: Optional[datetime] = None, retention_days: int = REMINDER_RETENTION_DAYS) -> int:
+    if now is None:
+        now = datetime.utcnow()
+    cutoff = now - timedelta(days=retention_days)
+    deleted = (
+        db_session.query(ReminderSent)
+        .filter(ReminderSent.sent_at < cutoff)
+        .delete(synchronize_session=False)
+    )
+    db_session.commit()
+    logger.info("清理过期提醒记录 %d 条（早于 %s）", deleted, cutoff.isoformat())
+    return deleted
+
+
+# ============================================================
+# 主入口（含幂等控制）
+# ============================================================
+
 def send_reminders(
     items: List[ActionItem],
     config: Optional[NotificationConfig] = None,
     http_session: Optional[requests.Session] = None,
+    db_session=None,
+    now: Optional[datetime] = None,
 ) -> dict:
     if config is None:
         config = notification_config
 
+    if now is None:
+        now = datetime.utcnow()
+
+    original_count = len(items)
+
+    if db_session is not None:
+        items = filter_pending_items(db_session, items, now=now)
+
     text_lines, structured = build_reminder_lines(items)
+    skipped_count = original_count - len(items)
 
     if not items:
-        return {"delivered": False, "channel": "none", "count": 0, "message": "无需要提醒的行动项"}
+        return {
+            "delivered": False,
+            "channel": "none",
+            "count": 0,
+            "skipped_dedup": skipped_count,
+            "message": "无需要提醒的行动项",
+        }
 
     if not config.enabled:
         log_reminder_fallback(structured, config.reminder_log_path, "通知未启用")
-        return {"delivered": False, "channel": "log", "count": len(structured), "reason": "notification_disabled"}
+        return {
+            "delivered": False,
+            "channel": "log",
+            "count": len(structured),
+            "skipped_dedup": skipped_count,
+            "reason": "notification_disabled",
+        }
 
     if not config.webhook_url:
         log_reminder_fallback(structured, config.reminder_log_path, "webhook URL 未配置")
-        return {"delivered": False, "channel": "log", "count": len(structured), "reason": "webhook_missing"}
+        return {
+            "delivered": False,
+            "channel": "log",
+            "count": len(structured),
+            "skipped_dedup": skipped_count,
+            "reason": "webhook_missing",
+        }
 
     payload = build_feishu_payload(text_lines)
     session = http_session or requests.Session()
@@ -111,19 +199,34 @@ def send_reminders(
     try:
         response = session.post(config.webhook_url, json=payload, timeout=10)
         if 200 <= response.status_code < 300:
-            return {"delivered": True, "channel": "feishu", "count": len(structured), "status_code": response.status_code}
+            if db_session is not None:
+                mark_items_as_sent(db_session, items, channel="feishu", now=now)
+            return {
+                "delivered": True,
+                "channel": "feishu",
+                "count": len(structured),
+                "skipped_dedup": skipped_count,
+                "status_code": response.status_code,
+            }
         else:
             log_reminder_fallback(structured, config.reminder_log_path, f"webhook 返回 {response.status_code}")
             return {
                 "delivered": False,
                 "channel": "log",
                 "count": len(structured),
+                "skipped_dedup": skipped_count,
                 "reason": "webhook_error",
                 "status_code": response.status_code,
             }
     except requests.RequestException as exc:
         log_reminder_fallback(structured, config.reminder_log_path, f"webhook 请求异常: {exc}")
-        return {"delivered": False, "channel": "log", "count": len(structured), "reason": f"request_exception:{type(exc).__name__}"}
+        return {
+            "delivered": False,
+            "channel": "log",
+            "count": len(structured),
+            "skipped_dedup": skipped_count,
+            "reason": f"request_exception:{type(exc).__name__}",
+        }
 
 
 def fetch_upcoming_items(db_session, within_days: int = 7, now: Optional[datetime] = None) -> List[ActionItem]:

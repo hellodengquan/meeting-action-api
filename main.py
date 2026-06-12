@@ -53,8 +53,9 @@ def get_notification_config():
 
 @app.post("/reminders/run-now", tags=["到期提醒"])
 def run_reminders_now(db: Session = Depends(get_db)):
+    notifier.cleanup_expired_sent_records(db)
     items = notifier.fetch_upcoming_items(db, within_days=7)
-    result = notifier.send_reminders(items)
+    result = notifier.send_reminders(items, db_session=db)
     return {"items_count": len(items), "result": result}
 
 
