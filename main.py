@@ -341,6 +341,19 @@ def get_idempotency_summary(
     return notifier.get_idempotency_summary(db, period_days=period_days)
 
 
+@app.get("/reminders/idempotency-detail", response_model=schemas.IdempotencyDetailResponse, tags=["到期提醒"])
+def get_idempotency_detail(
+    action_id: int = Query(..., description="行动项 ID"),
+    days: int = Query(7, description="最近 N 天（1~30）"),
+    db: Session = Depends(get_db),
+):
+    if days > 30:
+        raise HTTPException(status_code=400, detail="days 参数不得超过 30 天")
+    if days < 1:
+        raise HTTPException(status_code=400, detail="days 参数不得小于 1 天")
+    return notifier.get_idempotency_detail(db, action_id=action_id, period_days=days)
+
+
 @app.get("/stats/summary", tags=["统计"])
 def get_stats_summary(db: Session = Depends(get_db)):
     now = datetime.utcnow()

@@ -211,6 +211,88 @@ def get_idempotency_summary(db_session, period_days: int = 7, now: Optional[date
     }
 
 
+def get_idempotency_detail(db_session, action_id: int, period_days: int = 7, now: Optional[datetime] = None) -> dict:
+    from sqlalchemy import func
+
+    if now is None:
+        now = datetime.utcnow()
+
+    today_start = datetime(now.year, now.month, now.day)
+    start_date = today_start - timedelta(days=period_days - 1)
+    end_date = today_start
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+
+    records = (
+        db_session.query(
+            ReminderSent.sent_date,
+            func.count(ReminderSent.id).label("cnt"),
+            func.min(ReminderSent.sent_at).label("first_sent"),
+        )
+        .filter(
+            ReminderSent.action_id == action_id,
+            ReminderSent.sent_date >= start_date_str,
+            ReminderSent.sent_date <= end_date_str,
+        )
+        .group_by(ReminderSent.sent_date)
+        .order_by(ReminderSent.sent_date.asc())
+        .all()
+    )
+
+    rec_map = {}
+    sent_dates_in_period = []
+    for sent_date_str, cnt, first_sent in records:
+        rec_map[sent_date_str] = {"count": cnt, "first_sent": first_sent}
+        sent_dates_in_period.append(sent_date_str)
+
+    has_data = len(sent_dates_in_period) > 0
+
+    daily_details = []
+    for i in range(period_days):
+        d = start_date + timedelta(days=i)
+        d_str = d.strftime("%Y-%m-%d")
+        day_rec = rec_map.get(d_str)
+        if day_rec:
+            first_sent_str = day_rec["first_sent"].isoformat() if day_rec["first_sent"] else None
+            daily_details.append({
+                "date": d_str,
+                "first_sent_at": first_sent_str,
+                "skip_count": day_rec["count"],
+            })
+        else:
+            daily_details.append({
+                "date": d_str,
+                "first_sent_at": None,
+                "skip_count": 0,
+            })
+
+    total_skips = sum(d["skip_count"] for d in daily_details)
+
+    avg_interval: Optional[float] = None
+    if has_data:
+        sent_date_objs = sorted([
+            datetime.strptime(ds, "%Y-%m-%d")
+            for ds in sent_dates_in_period
+        ])
+        if len(sent_date_objs) >= 2:
+            intervals = [
+                (sent_date_objs[i + 1] - sent_date_objs[i]).days
+                for i in range(len(sent_date_objs) - 1)
+            ]
+            avg_interval = round(sum(intervals) / len(intervals), 2)
+        else:
+            avg_interval = None
+
+    return {
+        "action_id": action_id,
+        "period_days": period_days,
+        "has_data": has_data,
+        "total_skips_in_period": total_skips,
+        "average_skip_interval_days": avg_interval,
+        "daily_details": daily_details,
+    }
+
+
 # ============================================================
 # 主入口（含幂等控制）
 # ============================================================

@@ -112,3 +112,18 @@ class IdempotencySummary(BaseModel):
     most_skipped_action_count: int
     data_start_date: str
     data_end_date: str
+
+
+class IdempotencyDailyDetail(BaseModel):
+    date: str
+    first_sent_at: Optional[str]
+    skip_count: int
+
+
+class IdempotencyDetailResponse(BaseModel):
+    action_id: int
+    period_days: int
+    has_data: bool
+    total_skips_in_period: int
+    average_skip_interval_days: Optional[float]
+    daily_details: List[IdempotencyDailyDetail]
