@@ -1,19 +1,31 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from config import engine, get_db, Base
+from config import engine, get_db, Base, notification_config
 import models
 import schemas
+import notifier
+import scheduler
 
 Base.metadata.create_all(bind=engine)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.start_scheduler()
+    yield
+    scheduler.stop_scheduler()
+
 
 app = FastAPI(
     title="会议行动项管理 API",
     description="登记、跟踪会议纪要中的行动项，支持负责人管理、状态跟踪、到期提醒和多维度筛选",
-    version="1.0.0",
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -24,6 +36,26 @@ def root():
         "docs": "/docs",
         "redoc": "/redoc",
     }
+
+
+# ==================== 通知配置 ====================
+
+@app.get("/config/notification", tags=["通知配置"])
+def get_notification_config():
+    return {
+        "enabled": notification_config.enabled,
+        "has_webhook_url": bool(notification_config.webhook_url),
+        "webhook_url": (notification_config.webhook_url[:20] + "...") if notification_config.webhook_url else "",
+        "reminder_log_path": notification_config.reminder_log_path,
+        "scan_schedule": f"{notification_config.scan_hour:02d}:{notification_config.scan_minute:02d}",
+    }
+
+
+@app.post("/reminders/run-now", tags=["到期提醒"])
+def run_reminders_now(db: Session = Depends(get_db)):
+    items = notifier.fetch_upcoming_items(db, within_days=7)
+    result = notifier.send_reminders(items)
+    return {"items_count": len(items), "result": result}
 
 
 # ==================== 负责人接口 ====================
