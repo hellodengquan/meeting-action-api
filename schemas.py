@@ -97,3 +97,18 @@ class ReminderResponse(BaseModel):
     overdue: List[ActionItem]
     due_today: List[ActionItem]
     due_this_week: List[ActionItem]
+
+
+class DailySkipCount(BaseModel):
+    date: str
+    skipped_count: int
+
+
+class IdempotencySummary(BaseModel):
+    period_days: int
+    total_skipped: int
+    daily_skip: List[DailySkipCount]
+    most_skipped_action_id: Optional[int]
+    most_skipped_action_count: int
+    data_start_date: str
+    data_end_date: str

@@ -333,6 +333,14 @@ def get_reminders(
     )
 
 
+@app.get("/reminders/idempotency-summary", response_model=schemas.IdempotencySummary, tags=["到期提醒"])
+def get_idempotency_summary(
+    period_days: int = Query(7, ge=1, le=30, description="统计最近 N 天的数据"),
+    db: Session = Depends(get_db),
+):
+    return notifier.get_idempotency_summary(db, period_days=period_days)
+
+
 @app.get("/stats/summary", tags=["统计"])
 def get_stats_summary(db: Session = Depends(get_db)):
     now = datetime.utcnow()

@@ -140,6 +140,78 @@ def cleanup_expired_sent_records(db_session, now: Optional[datetime] = None, ret
 
 
 # ============================================================
+# 幂等统计（可观测性）
+# ============================================================
+
+def get_idempotency_summary(db_session, period_days: int = 7, now: Optional[datetime] = None) -> dict:
+    from sqlalchemy import func
+
+    if now is None:
+        now = datetime.utcnow()
+
+    today_start = datetime(now.year, now.month, now.day)
+    start_date = today_start - timedelta(days=period_days - 1)
+    end_date = today_start
+
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+
+    daily_counts = (
+        db_session.query(
+            ReminderSent.sent_date,
+            func.count(ReminderSent.id).label("cnt"),
+        )
+        .filter(
+            ReminderSent.sent_date >= start_date_str,
+            ReminderSent.sent_date <= end_date_str,
+        )
+        .group_by(ReminderSent.sent_date)
+        .order_by(ReminderSent.sent_date.asc())
+        .all()
+    )
+
+    daily_skip_map = {date: cnt for date, cnt in daily_counts}
+
+    full_daily = []
+    for i in range(period_days):
+        d = start_date + timedelta(days=i)
+        d_str = d.strftime("%Y-%m-%d")
+        full_daily.append({"date": d_str, "skipped_count": daily_skip_map.get(d_str, 0)})
+
+    action_counts = (
+        db_session.query(
+            ReminderSent.action_id,
+            func.count(ReminderSent.id).label("cnt"),
+        )
+        .filter(
+            ReminderSent.sent_date >= start_date_str,
+            ReminderSent.sent_date <= end_date_str,
+        )
+        .group_by(ReminderSent.action_id)
+        .order_by(func.count(ReminderSent.id).desc())
+        .limit(1)
+        .all()
+    )
+
+    most_skipped_action_id = None
+    most_skipped_action_count = 0
+    if action_counts:
+        most_skipped_action_id, most_skipped_action_count = action_counts[0]
+
+    total_skipped = sum(item["skipped_count"] for item in full_daily)
+
+    return {
+        "period_days": period_days,
+        "total_skipped": total_skipped,
+        "daily_skip": full_daily,
+        "most_skipped_action_id": most_skipped_action_id,
+        "most_skipped_action_count": most_skipped_action_count,
+        "data_start_date": start_date_str,
+        "data_end_date": end_date_str,
+    }
+
+
+# ============================================================
 # 主入口（含幂等控制）
 # ============================================================
 
